@@ -82,6 +82,18 @@ install_go() {
     export PATH="/usr/local/go/bin:$PATH"
 }
 
+clean_old_runtime() {
+    is_zh && log "清理旧程序和安装缓存" || log "Cleaning old runtime and install cache"
+    is_zh && warn "保留数据目录 ${DATA_DIR}" || warn "Keeping data directory ${DATA_DIR}"
+    systemctl stop x-ui >/dev/null 2>&1 || true
+    rm -rf /tmp/x-mili-go.tar.gz /tmp/x-mili-install.* /tmp/x-mili-src.*
+    if [[ -n "$INSTALL_DIR" && "$INSTALL_DIR" != "/" ]]; then
+        rm -rf "$INSTALL_DIR"
+    fi
+    rm -f /usr/bin/ml /usr/bin/x-ui
+    mkdir -p "$INSTALL_DIR" "$DATA_DIR" "$LANG_DIR"
+}
+
 install_service() {
     cat > /etc/systemd/system/x-ui.service <<EOF
 [Unit]
@@ -112,8 +124,9 @@ is_zh && log "开始安装/更新 ${APP_NAME}" || log "Installing/updating ${APP
 command -v systemctl >/dev/null 2>&1 || fail "需要 systemd / systemd is required"
 install_deps
 install_go
+clean_old_runtime
 
-tmp_dir=$(mktemp -d)
+tmp_dir=$(mktemp -d -t x-mili-install.XXXXXX)
 trap 'rm -rf "$tmp_dir"' EXIT
 
 log "Downloading source: ${REPO}"
@@ -126,8 +139,6 @@ cd "$tmp_dir/src"
 chmod +x DockerInit.sh
 ./DockerInit.sh "$(detect_arch)"
 
-systemctl stop x-ui >/dev/null 2>&1 || true
-mkdir -p "$INSTALL_DIR" "$DATA_DIR" "$LANG_DIR"
 cp -r build/* "$INSTALL_DIR/"
 install -m 755 x-ui.sh /usr/bin/x-ui
 install -m 755 x-ui.sh /usr/bin/ml
