@@ -306,6 +306,11 @@ func (s *Server) startTask() {
 
 	// Check and refresh VPNGate nodes periodically
 	s.cron.AddFunc("@every 1m", func() {
+		openvpnService := &service.OpenVPNService{}
+		status := openvpnService.VPNGateStatus()
+		if status.Phase != "connected" {
+			return
+		}
 		settingService := &service.SettingService{}
 		interval, err := settingService.GetVPNGateRefreshInterval()
 		if err != nil || interval < 15 {

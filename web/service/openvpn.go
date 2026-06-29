@@ -49,7 +49,7 @@ type openVPNTask struct {
 	status            OpenVPNStatus
 	ruleMode          string
 	selectedCountries []string
-	favoriteFallback  bool
+	fallbackEnable    bool
 }
 
 var vpnGateOpenVPN = &openVPNTask{
@@ -60,7 +60,7 @@ var vpnGateOpenVPN = &openVPNTask{
 	},
 }
 
-func (s *OpenVPNService) StartVPNGate(server VPNGateServer, ruleMode string, selectedCountries []string, favoriteFallback bool) (*OpenVPNStatus, error) {
+func (s *OpenVPNService) StartVPNGate(server VPNGateServer, ruleMode string, selectedCountries []string, fallbackEnable bool) (*OpenVPNStatus, error) {
 	if server.OpenVPNConfig == "" {
 		return nil, errors.New("OpenVPN config is empty")
 	}
@@ -73,7 +73,7 @@ func (s *OpenVPNService) StartVPNGate(server VPNGateServer, ruleMode string, sel
 	vpnGateOpenVPN.cancel = cancel
 	vpnGateOpenVPN.ruleMode = ruleMode
 	vpnGateOpenVPN.selectedCountries = selectedCountries
-	vpnGateOpenVPN.favoriteFallback = favoriteFallback
+	vpnGateOpenVPN.fallbackEnable = fallbackEnable
 	vpnGateOpenVPN.status = OpenVPNStatus{
 		Phase:    "installing",
 		Progress: 8,
@@ -616,7 +616,7 @@ func triggerVPNGateFailover(taskID int64) {
 	}
 	ruleMode := vpnGateOpenVPN.ruleMode
 	selectedCountries := vpnGateOpenVPN.selectedCountries
-	favoriteFallback := vpnGateOpenVPN.favoriteFallback
+	fallbackEnable := vpnGateOpenVPN.fallbackEnable
 	currentServer := vpnGateOpenVPN.status.Server
 
 	if ruleMode == "" {
@@ -656,14 +656,13 @@ func triggerVPNGateFailover(taskID int64) {
 				pool = append(pool, s)
 			}
 		}
-	} else if ruleMode == "dynamic" {
-		for _, s := range servers {
-			if containsString(selectedCountries, s.CountryShort) {
-				pool = append(pool, s)
-			}
-		}
 		if len(pool) == 0 {
-			pool = servers
+			if fallbackEnable {
+				pool = servers
+			} else {
+				vpnGateOpenVPN.fail(taskID, "所有选定国家节点均已失效且关闭了候补连接")
+				return
+			}
 		}
 	} else if ruleMode == "favorite" {
 		for _, s := range servers {
@@ -672,10 +671,10 @@ func triggerVPNGateFailover(taskID int64) {
 			}
 		}
 		if len(pool) == 0 {
-			if favoriteFallback {
+			if fallbackEnable {
 				pool = servers
 			} else {
-				vpnGateOpenVPN.fail(taskID, "所有收藏节点均已失效且关闭了候补")
+				vpnGateOpenVPN.fail(taskID, "所有收藏节点均已失效且关闭了候补连接")
 				return
 			}
 		}
@@ -696,7 +695,7 @@ func triggerVPNGateFailover(taskID int64) {
 	}
 
 	if len(candidates) == 0 {
-		if ruleMode == "favorite" && favoriteFallback && len(pool) < len(servers) {
+		if (ruleMode == "favorite" || ruleMode == "fixed") && fallbackEnable && len(pool) < len(servers) {
 			for _, s := range servers {
 				if currentServer == nil || s.IP != currentServer.IP {
 					candidates = append(candidates, s)
@@ -806,5 +805,106 @@ func updateXrayVPNGateOutbound(outbound map[string]any) error {
 	}
 
 	// 6. Restart Xray
+	return xrayService.RestartXray(true)
+}
+
+func (s *OpenVPNService) UninstallVPNGate() error {
+	// 1. Cancel/stop any running openvpn tasks
+	vpnGateOpenVPN.Lock()
+	vpnGateOpenVPN.stopLocked()
+	vpnGateOpenVPN.status.Phase = "idle"
+	vpnGateOpenVPN.status.Progress = 0
+	vpnGateOpenVPN.status.Message = "未连接"
+	vpnGateOpenVPN.status.Error = ""
+	vpnGateOpenVPN.status.TunIP = ""
+	vpnGateOpenVPN.status.TunDev = ""
+	vpnGateOpenVPN.status.Outbound = nil
+	vpnGateOpenVPN.Unlock()
+
+	// 2. Perform package purging on Linux
+	if runtime.GOOS == "linux" {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+
+		var err error
+		switch {
+		case commandExists("apt-get"):
+			err = runCommand(ctx, "apt-get", "purge", "-y", "openvpn")
+			if err == nil {
+				_ = runCommand(ctx, "apt-get", "autoremove", "-y")
+			}
+		case commandExists("dnf"):
+			err = runCommand(ctx, "dnf", "remove", "-y", "openvpn")
+		case commandExists("yum"):
+			err = runCommand(ctx, "yum", "remove", "-y", "openvpn")
+		case commandExists("apk"):
+			err = runCommand(ctx, "apk", "del", "openvpn")
+		case commandExists("pacman"):
+			err = runCommand(ctx, "pacman", "-Rns", "--noconfirm", "openvpn")
+		default:
+			err = errors.New("unsupported package manager for uninstallation")
+		}
+		if err != nil {
+			logger.Warningf("[VPNGate] Failed to uninstall openvpn package: %v", err)
+		}
+	}
+
+	// 3. Clear node information (servers list cache)
+	vpngateService := &VPNGateService{}
+	vpngateService.ClearCache()
+
+	// 4. Remove outbound tag "vpngate" from xray template
+	_ = removeXrayVPNGateOutbound()
+
+	return nil
+}
+
+func removeXrayVPNGateOutbound() error {
+	settingService := &SettingService{}
+	xraySettingService := &XraySettingService{}
+	xrayService := &XrayService{}
+
+	templateConfig, err := settingService.GetXrayConfigTemplate()
+	if err != nil {
+		return err
+	}
+
+	var configMap map[string]any
+	if err := json.Unmarshal([]byte(templateConfig), &configMap); err != nil {
+		return err
+	}
+
+	outboundsVal, ok := configMap["outbounds"]
+	if !ok {
+		return nil
+	}
+	outbounds, ok := outboundsVal.([]any)
+	if !ok {
+		return nil
+	}
+
+	var newOutbounds []any
+	for _, o := range outbounds {
+		oMap, ok := o.(map[string]any)
+		if !ok {
+			newOutbounds = append(newOutbounds, o)
+			continue
+		}
+		if tag, ok := oMap["tag"].(string); ok && tag == vpnGateOutboundTag {
+			continue
+		}
+		newOutbounds = append(newOutbounds, o)
+	}
+	configMap["outbounds"] = newOutbounds
+
+	newConfigBytes, err := json.MarshalIndent(configMap, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	if err := xraySettingService.SaveXraySetting(string(newConfigBytes)); err != nil {
+		return err
+	}
+
 	return xrayService.RestartXray(true)
 }

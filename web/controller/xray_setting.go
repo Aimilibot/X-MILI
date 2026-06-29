@@ -168,8 +168,8 @@ func (a *XraySettingController) vpngate(c *gin.Context) {
 			ruleMode := c.PostForm("ruleMode")
 			var selectedCountries []string
 			_ = json.Unmarshal([]byte(c.PostForm("selectedCountries")), &selectedCountries)
-			favoriteFallback := c.PostForm("favoriteFallback") == "true"
-			resp, err = a.OpenVPNService.StartVPNGate(server, ruleMode, selectedCountries, favoriteFallback)
+			fallbackEnable := c.PostForm("fallbackEnable") == "true"
+			resp, err = a.OpenVPNService.StartVPNGate(server, ruleMode, selectedCountries, fallbackEnable)
 		}
 	case "get_settings":
 		interval, errVal := a.SettingService.GetVPNGateRefreshInterval()
@@ -210,6 +210,10 @@ func (a *XraySettingController) vpngate(c *gin.Context) {
 		resp = &status
 	case "stop":
 		status := a.OpenVPNService.StopVPNGate()
+		resp = &status
+	case "uninstall":
+		err = a.OpenVPNService.UninstallVPNGate()
+		status := a.OpenVPNService.VPNGateStatus()
 		resp = &status
 	default:
 		err = common.NewError("unknown vpngate action")

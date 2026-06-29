@@ -432,3 +432,10 @@ func CheckAndRefreshVPNGate(intervalMinutes int) {
 		}()
 	}
 }
+
+func (s *VPNGateService) ClearCache() {
+	vpnGateCache.Lock()
+	defer vpnGateCache.Unlock()
+	vpnGateCache.servers = nil
+	vpnGateCache.expires = time.Time{}
+}
