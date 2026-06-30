@@ -25,6 +25,7 @@ import (
 const (
 	vpnGateOutboundTag = "vpngate"
 	vpnGateRouteTable  = "10077"
+	vpnGateFailedTTL   = 30 * time.Minute
 )
 
 type OpenVPNService struct{}
@@ -50,6 +51,8 @@ type openVPNTask struct {
 	ruleMode          string
 	selectedCountries []string
 	fallbackEnable    bool
+	globalFallback    bool
+	failedUntil       map[string]time.Time
 }
 
 var vpnGateOpenVPN = &openVPNTask{
@@ -84,6 +87,10 @@ func (s *OpenVPNService) StartVPNGate(server VPNGateServer, ruleMode string, sel
 	vpnGateOpenVPN.ruleMode = ruleMode
 	vpnGateOpenVPN.selectedCountries = selectedCountries
 	vpnGateOpenVPN.fallbackEnable = fallbackEnable
+	vpnGateOpenVPN.globalFallback = false
+	if vpnGateOpenVPN.failedUntil == nil {
+		vpnGateOpenVPN.failedUntil = map[string]time.Time{}
+	}
 	vpnGateOpenVPN.status = OpenVPNStatus{
 		Phase:    "installing",
 		Progress: 8,
@@ -95,6 +102,23 @@ func (s *OpenVPNService) StartVPNGate(server VPNGateServer, ruleMode string, sel
 	go s.connectVPNGate(ctx, taskID, server)
 	status := s.VPNGateStatus()
 	return &status, nil
+}
+
+func (s *OpenVPNService) ContinueVPNGateWithAll() OpenVPNStatus {
+	vpnGateOpenVPN.Lock()
+	if vpnGateOpenVPN.status.Phase != "waiting_confirm" {
+		defer vpnGateOpenVPN.Unlock()
+		return cloneOpenVPNStatus(vpnGateOpenVPN.status)
+	}
+	vpnGateOpenVPN.globalFallback = true
+	vpnGateOpenVPN.status.Phase = "connecting"
+	vpnGateOpenVPN.status.Progress = 50
+	vpnGateOpenVPN.status.Message = "正在临时使用全部节点继续连接"
+	taskID := vpnGateOpenVPN.id
+	vpnGateOpenVPN.Unlock()
+
+	go triggerVPNGateFailover(taskID)
+	return s.VPNGateStatus()
 }
 
 func (s *OpenVPNService) VPNGateStatus() OpenVPNStatus {
@@ -134,7 +158,7 @@ func (s *OpenVPNService) connectVPNGate(ctx context.Context, taskID int64, serve
 	vpnGateOpenVPN.setTask(taskID, "preparing", 30, "正在清洗配置")
 	ovpn, err := sanitizeVPNGateOpenVPNConfig(server.OpenVPNConfig)
 	if err != nil {
-		vpnGateOpenVPN.fail(taskID, err.Error())
+		handleVPNGateNodeFailure(taskID, server, err.Error())
 		return
 	}
 	workDir := filepath.Join(config.GetBinFolderPath(), "vpngate")
@@ -191,16 +215,18 @@ func (s *OpenVPNService) connectVPNGate(ctx context.Context, taskID int64, serve
 			vpnGateOpenVPN.Unlock()
 			if phase == "connected" {
 				go triggerVPNGateFailover(taskID)
+			} else if phase == "connecting" || phase == "waiting_confirm" || phase == "canceled" {
+				return
 			} else {
 				if err == nil {
-					vpnGateOpenVPN.fail(taskID, "OpenVPN 已退出")
+					handleVPNGateNodeFailure(taskID, server, "OpenVPN 已退出")
 				} else {
-					vpnGateOpenVPN.fail(taskID, err.Error())
+					handleVPNGateNodeFailure(taskID, server, err.Error())
 				}
 			}
 			return
 		case <-deadline:
-			vpnGateOpenVPN.fail(taskID, "OpenVPN 连接超时")
+			handleVPNGateNodeFailure(taskID, server, "OpenVPN 连接超时")
 			return
 		case <-ticker.C:
 			vpnGateOpenVPN.appendLog(writer.lines())
@@ -247,12 +273,14 @@ func (s *OpenVPNService) connectVPNGate(ctx context.Context, taskID int64, serve
 					vpnGateOpenVPN.Unlock()
 					if phase == "connected" {
 						go triggerVPNGateFailover(taskID)
+					} else if phase == "connecting" || phase == "waiting_confirm" || phase == "canceled" {
+						return
 					} else {
 						msg := "OpenVPN 已断开"
 						if err != nil {
 							msg += ": " + err.Error()
 						}
-						vpnGateOpenVPN.fail(taskID, msg)
+						handleVPNGateNodeFailure(taskID, server, msg)
 					}
 				}()
 
@@ -261,7 +289,7 @@ func (s *OpenVPNService) connectVPNGate(ctx context.Context, taskID int64, serve
 				return
 			}
 			if writer.contains("AUTH_FAILED") {
-				vpnGateOpenVPN.fail(taskID, "OpenVPN 认证失败")
+				handleVPNGateNodeFailure(taskID, server, "OpenVPN 认证失败")
 				return
 			}
 		}
@@ -491,6 +519,29 @@ func (t *openVPNTask) fail(taskID int64, message string) {
 	t.status.TunDev = ""
 }
 
+func handleVPNGateNodeFailure(taskID int64, server VPNGateServer, message string) {
+	vpnGateOpenVPN.Lock()
+	if vpnGateOpenVPN.id != taskID || vpnGateOpenVPN.status.Phase == "canceled" {
+		vpnGateOpenVPN.Unlock()
+		return
+	}
+	if vpnGateOpenVPN.failedUntil == nil {
+		vpnGateOpenVPN.failedUntil = map[string]time.Time{}
+	}
+	if server.IP != "" {
+		vpnGateOpenVPN.failedUntil[server.IP] = time.Now().Add(vpnGateFailedTTL)
+	}
+	retry := vpnGateOpenVPN.fallbackEnable
+	vpnGateOpenVPN.Unlock()
+
+	if !retry {
+		vpnGateOpenVPN.fail(taskID, message)
+		return
+	}
+	logger.Warningf("[VPNGate] Node %s failed, trying fallback: %s", server.IP, message)
+	go triggerVPNGateFailover(taskID)
+}
+
 func (t *openVPNTask) stopLocked() {
 	if t.cancel != nil {
 		t.cancel()
@@ -627,12 +678,20 @@ func triggerVPNGateFailover(taskID int64) {
 	ruleMode := normalizeVPNGateRuleMode(vpnGateOpenVPN.ruleMode)
 	selectedCountries := vpnGateOpenVPN.selectedCountries
 	fallbackEnable := vpnGateOpenVPN.fallbackEnable
+	globalFallback := vpnGateOpenVPN.globalFallback
 	currentServer := vpnGateOpenVPN.status.Server
+	if vpnGateOpenVPN.failedUntil == nil {
+		vpnGateOpenVPN.failedUntil = map[string]time.Time{}
+	}
+	if currentServer != nil && currentServer.IP != "" {
+		vpnGateOpenVPN.failedUntil[currentServer.IP] = time.Now().Add(vpnGateFailedTTL)
+	}
+	failedUntil := copyVPNGateFailedUntil(vpnGateOpenVPN.failedUntil)
 
-	vpnGateOpenVPN.stopLocked()
 	vpnGateOpenVPN.status.Phase = "connecting"
 	vpnGateOpenVPN.status.Message = "检测到节点失效，正在自动选择后备节点"
 	vpnGateOpenVPN.status.Progress = 50
+	vpnGateOpenVPN.stopLocked()
 	vpnGateOpenVPN.Unlock()
 
 	// 1. Fetch fresh list of servers
@@ -652,24 +711,15 @@ func triggerVPNGateFailover(taskID int64) {
 	var favorites []string
 	_ = json.Unmarshal([]byte(favStr), &favorites)
 
-	// 2. Filter servers based on ruleMode & selectedCountries
 	var pool []VPNGateServer
 	if ruleMode == "fixed" {
 		if len(selectedCountries) == 0 {
-			vpnGateOpenVPN.fail(taskID, "固定连接未选择国家/地区")
+			vpnGateOpenVPN.fail(taskID, "国家连接未选择国家/地区")
 			return
 		}
 		for _, s := range servers {
 			if containsString(selectedCountries, s.CountryShort) {
 				pool = append(pool, s)
-			}
-		}
-		if len(pool) == 0 {
-			if fallbackEnable {
-				pool = servers
-			} else {
-				vpnGateOpenVPN.fail(taskID, "所有选定国家节点均已失效且关闭了候补连接")
-				return
 			}
 		}
 	} else if ruleMode == "favorite" {
@@ -682,38 +732,28 @@ func triggerVPNGateFailover(taskID int64) {
 				pool = append(pool, s)
 			}
 		}
-		if len(pool) == 0 {
-			if fallbackEnable {
-				pool = servers
-			} else {
-				vpnGateOpenVPN.fail(taskID, "所有收藏节点均已失效且关闭了候补连接")
-				return
-			}
-		}
 	} else {
 		pool = servers
 	}
 
-	// Filter out the failed server IP
-	var candidates []VPNGateServer
-	if currentServer != nil {
-		for _, s := range pool {
-			if s.IP != currentServer.IP {
-				candidates = append(candidates, s)
-			}
-		}
-	} else {
-		candidates = pool
-	}
+	candidates := filterVPNGateCandidates(pool, currentServer, failedUntil, time.Now())
 
-	if len(candidates) == 0 {
-		if (ruleMode == "favorite" || ruleMode == "fixed") && fallbackEnable && len(pool) < len(servers) {
-			for _, s := range servers {
-				if currentServer == nil || s.IP != currentServer.IP {
-					candidates = append(candidates, s)
-				}
-			}
+	if len(candidates) == 0 && (ruleMode == "favorite" || ruleMode == "fixed") {
+		if !fallbackEnable {
+			vpnGateOpenVPN.fail(taskID, "当前连接范围内没有可用后备节点")
+			return
 		}
+		if !globalFallback {
+			vpnGateOpenVPN.Lock()
+			if vpnGateOpenVPN.id == taskID {
+				vpnGateOpenVPN.status.Phase = "waiting_confirm"
+				vpnGateOpenVPN.status.Progress = 50
+				vpnGateOpenVPN.status.Message = "当前范围内的节点都不可用，是否临时使用全部节点继续连接？"
+			}
+			vpnGateOpenVPN.Unlock()
+			return
+		}
+		candidates = filterVPNGateCandidates(servers, currentServer, failedUntil, time.Now())
 	}
 
 	if len(candidates) == 0 {
@@ -750,6 +790,28 @@ func triggerVPNGateFailover(taskID int64) {
 
 	openvpnService := &OpenVPNService{}
 	go openvpnService.connectVPNGate(ctx, taskID, best)
+}
+
+func copyVPNGateFailedUntil(src map[string]time.Time) map[string]time.Time {
+	dst := make(map[string]time.Time, len(src))
+	for ip, until := range src {
+		dst[ip] = until
+	}
+	return dst
+}
+
+func filterVPNGateCandidates(pool []VPNGateServer, current *VPNGateServer, failedUntil map[string]time.Time, now time.Time) []VPNGateServer {
+	candidates := make([]VPNGateServer, 0, len(pool))
+	for _, server := range pool {
+		if current != nil && server.IP == current.IP {
+			continue
+		}
+		if until, ok := failedUntil[server.IP]; ok && now.Before(until) {
+			continue
+		}
+		candidates = append(candidates, server)
+	}
+	return candidates
 }
 
 func containsString(slice []string, s string) bool {

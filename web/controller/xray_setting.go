@@ -153,7 +153,7 @@ func (a *XraySettingController) warp(c *gin.Context) {
 }
 
 func (a *XraySettingController) vpngateList(c *gin.Context) {
-	servers, err := a.VPNGateService.ListServers(c.PostForm("refresh") == "true")
+	servers, err := a.VPNGateService.ListServersWithUnavailable(c.PostForm("refresh") == "true", c.PostForm("showUnavailable") == "true")
 	jsonObj(c, servers, err)
 }
 
@@ -250,6 +250,9 @@ func (a *XraySettingController) vpngate(c *gin.Context) {
 		resp = &status
 	case "cancel":
 		status := a.OpenVPNService.CancelVPNGate()
+		resp = &status
+	case "continue":
+		status := a.OpenVPNService.ContinueVPNGateWithAll()
 		resp = &status
 	case "stop":
 		status := a.OpenVPNService.StopVPNGate()

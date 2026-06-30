@@ -60,6 +60,36 @@ func TestListServersReturnsCachedCopy(t *testing.T) {
 	}
 }
 
+func TestListServersCanIncludeUnavailableFromCache(t *testing.T) {
+	vpnGateCache.Lock()
+	oldServers, oldExpires := vpnGateCache.servers, vpnGateCache.expires
+	vpnGateCache.servers = []VPNGateServer{{IP: "1.2.3.4", LocalPing: 10}, {IP: "5.6.7.8", LocalPing: -1}}
+	vpnGateCache.expires = time.Now().Add(time.Minute)
+	vpnGateCache.Unlock()
+	defer func() {
+		vpnGateCache.Lock()
+		vpnGateCache.servers, vpnGateCache.expires = oldServers, oldExpires
+		vpnGateCache.Unlock()
+	}()
+
+	service := &VPNGateService{}
+	servers, err := service.ListServers(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(servers) != 1 || servers[0].IP != "1.2.3.4" {
+		t.Fatalf("unexpected available servers: %+v", servers)
+	}
+
+	servers, err = service.ListServersWithUnavailable(false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(servers) != 2 {
+		t.Fatalf("unexpected all servers: %+v", servers)
+	}
+}
+
 func TestSanitizeVPNGateOpenVPNConfig(t *testing.T) {
 	raw := "client\nscript-security 2\nup /tmp/pwn\nremote 1.2.3.4 1194\n<ca>\nup is just cert text\n</ca>\n"
 	config := base64.StdEncoding.EncodeToString([]byte(raw))
@@ -114,5 +144,24 @@ func TestChooseOpenVPNTunRejectsReusedSingleTun(t *testing.T) {
 	)
 	if ok {
 		t.Fatalf("expected tun to be rejected because it is reused with the same IP")
+	}
+}
+
+func TestFilterVPNGateCandidatesSkipsCurrentAndTemporarilyFailed(t *testing.T) {
+	now := time.Now()
+	current := &VPNGateServer{IP: "1.1.1.1"}
+	servers := []VPNGateServer{
+		{IP: "1.1.1.1"},
+		{IP: "2.2.2.2"},
+		{IP: "3.3.3.3"},
+	}
+	failedUntil := map[string]time.Time{
+		"2.2.2.2": now.Add(time.Minute),
+		"3.3.3.3": now.Add(-time.Minute),
+	}
+
+	got := filterVPNGateCandidates(servers, current, failedUntil, now)
+	if len(got) != 1 || got[0].IP != "3.3.3.3" {
+		t.Fatalf("unexpected candidates: %+v", got)
 	}
 }

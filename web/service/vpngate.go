@@ -80,11 +80,18 @@ var vpnGateCache struct {
 }
 
 func (s *VPNGateService) ListServers(refresh bool) ([]VPNGateServer, error) {
+	return s.ListServersWithUnavailable(refresh, false)
+}
+
+func (s *VPNGateService) ListServersWithUnavailable(refresh bool, includeUnavailable bool) ([]VPNGateServer, error) {
 	vpnGateCache.Lock()
 	defer vpnGateCache.Unlock()
 
 	if !refresh && time.Now().Before(vpnGateCache.expires) {
-		return cloneVPNGateServers(vpnGateCache.servers), nil
+		if includeUnavailable {
+			return cloneVPNGateServers(vpnGateCache.servers), nil
+		}
+		return cloneVPNGateServers(filterVPNGateAvailable(vpnGateCache.servers)), nil
 	}
 
 	servers, err := loadVPNGateServers()
@@ -98,7 +105,10 @@ func (s *VPNGateService) ListServers(refresh bool) ([]VPNGateServer, error) {
 	lastFetchTime = time.Now()
 	lastFetchTimeMutex.Unlock()
 
-	return cloneVPNGateServers(vpnGateCache.servers), nil
+	if includeUnavailable {
+		return cloneVPNGateServers(vpnGateCache.servers), nil
+	}
+	return cloneVPNGateServers(filterVPNGateAvailable(vpnGateCache.servers)), nil
 }
 
 func loadVPNGateServers() ([]VPNGateServer, error) {
@@ -351,11 +361,20 @@ func checkVPNGateServers(servers []VPNGateServer) []VPNGateServer {
 		res := <-results
 		checked[res.index] = res
 	}
-	active := make([]VPNGateServer, 0, len(servers))
 	for i, res := range checked {
+		servers[i].LocalPing = -1
 		if res.isAlive {
 			servers[i].LocalPing = res.localPing
-			active = append(active, servers[i])
+		}
+	}
+	return servers
+}
+
+func filterVPNGateAvailable(servers []VPNGateServer) []VPNGateServer {
+	active := make([]VPNGateServer, 0, len(servers))
+	for _, server := range servers {
+		if server.LocalPing >= 0 {
+			active = append(active, server)
 		}
 	}
 	return active
