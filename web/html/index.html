@@ -23,7 +23,7 @@
     <a-layout-content>
       <a-spin :spinning="loadingStates.spinning" :delay="200" :tip="loadingTip" size="large">
         <transition name="list" appear>
-          <a-alert type="error" v-if="showAlert && loadingStates.fetched" class="mb-10"
+          <a-alert type="error" v-if="securityAlertsEnable && showAlert && loadingStates.fetched" class="mb-10"
             message='{{ i18n "secAlertTitle" }}' color="red" description='{{ i18n "secAlertSsl" }}' show-icon closable>
           </a-alert>
         </transition>
@@ -1155,6 +1155,7 @@
       backupModal,
       loadingTip: '{{ i18n "loading"}}',
       showAlert: false,
+      securityAlertsEnable: false,
       showIp: false,
       ipLimitEnable: false,
       customGeoColumns,
@@ -1571,6 +1572,7 @@
       const msg = await HttpUtil.post('/panel/setting/defaultSettings');
       if (msg.success) {
         this.ipLimitEnable = msg.obj.ipLimitEnable;
+        this.securityAlertsEnable = msg.obj.securityAlertsEnable === true;
       }
 
       // Initial status fetch
