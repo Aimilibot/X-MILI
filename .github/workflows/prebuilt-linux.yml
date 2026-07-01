@@ -10,35 +10,45 @@ permissions:
   contents: write
 
 jobs:
-  build-amd64:
+  build:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+          - arch: arm64
+            platform: linux/arm64
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.26.2'
-
-      - name: Install build tools
-        run: sudo apt-get update && sudo apt-get install -y gcc libc6-dev unzip
+      - uses: docker/setup-qemu-action@v3
 
       - name: Build bundle
         run: |
-          mkdir -p build dist
-          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags "-w -s" -o build/x-ui main.go
-          chmod +x DockerInit.sh
-          ./DockerInit.sh amd64
-          cp x-ui.sh build/x-ui.sh
-          echo "$GITHUB_SHA" > build/.x-mili-commit
-          tar -C build -czf dist/x-mili-linux-amd64.tar.gz .
+          docker run --rm --platform "${{ matrix.platform }}" \
+            -e GITHUB_SHA="$GITHUB_SHA" \
+            -v "$PWD:/src" -w /src golang:1.26.2-bookworm bash -lc '
+              apt-get update
+              apt-get install -y --no-install-recommends gcc libc6-dev unzip ca-certificates curl
+              rm -rf build dist
+              mkdir -p build dist
+              CGO_ENABLED=1 go build -ldflags "-w -s" -o build/x-ui main.go
+              chmod +x DockerInit.sh
+              ./DockerInit.sh "${{ matrix.arch }}"
+              cp x-ui.sh build/x-ui.sh
+              echo "$GITHUB_SHA" > build/.x-mili-commit
+              tar -C build -czf "dist/x-mili-linux-${{ matrix.arch }}.tar.gz" .
+            '
 
       - uses: actions/upload-artifact@v4
         with:
-          name: x-mili-linux-amd64
-          path: dist/x-mili-linux-amd64.tar.gz
+          name: x-mili-linux-${{ matrix.arch }}
+          path: dist/x-mili-linux-${{ matrix.arch }}.tar.gz
 
   publish:
-    needs: build-amd64
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -59,4 +69,4 @@ jobs:
           git tag -f latest "$GITHUB_SHA"
           git push -f origin latest
           gh release view latest >/dev/null 2>&1 || gh release create latest --title "Latest X-MILI build" --notes "Automatically updated from main." --prerelease
-          gh release upload latest dist/x-mili-linux-amd64.tar.gz --clobber
+          gh release upload latest dist/x-mili-linux-*.tar.gz --clobber

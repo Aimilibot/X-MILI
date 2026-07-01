@@ -3,8 +3,6 @@ set -e
 
 APP_NAME="X-MILI"
 REPO="https://github.com/Aimilibot/X-MILI"
-RAW="${X_MILI_RAW_BASE:-https://raw.githubusercontent.com/Aimilibot/X-MILI/main}"
-GO_VERSION="${X_MILI_GO_VERSION:-1.26.2}"
 RELEASE_TAG="${X_MILI_RELEASE_TAG:-latest}"
 INSTALL_DIR="${XUI_MAIN_FOLDER:-/usr/local/x-ui}"
 DATA_DIR="/etc/x-ui"
@@ -37,74 +35,25 @@ choose_language() {
 
 is_zh() { [[ "$X_MILI_LANG" == "zh_CN" ]]; }
 
-build_swap_file=""
-build_swap_created=0
-
-ensure_build_swap() {
-    local mem_mb swap_mb size_mb
-    mem_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
-    swap_mb=$(awk '/SwapTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
-    (( mem_mb > 0 && mem_mb < 1536 && swap_mb < 512 )) || return 0
-
-    size_mb="${X_MILI_BUILD_SWAP_MB:-2048}"
-    build_swap_file="${X_MILI_BUILD_SWAP_FILE:-/var/tmp/x-mili-build.swap}"
-    is_zh && warn "检测到低内存 ${mem_mb}MB，临时启用 ${size_mb}MB swap 防止编译中断。" || warn "Low memory detected (${mem_mb}MB). Enabling ${size_mb}MB temporary swap for build."
-
-    rm -f "$build_swap_file"
-    if command -v fallocate >/dev/null 2>&1; then
-        fallocate -l "${size_mb}M" "$build_swap_file" || dd if=/dev/zero of="$build_swap_file" bs=1M count="$size_mb"
-    else
-        dd if=/dev/zero of="$build_swap_file" bs=1M count="$size_mb"
-    fi
-    chmod 600 "$build_swap_file"
-    mkswap "$build_swap_file" >/dev/null
-    swapon "$build_swap_file"
-    build_swap_created=1
-}
-
-cleanup_build_swap() {
-    if [[ "$build_swap_created" == "1" && -n "$build_swap_file" ]]; then
-        swapoff "$build_swap_file" >/dev/null 2>&1 || true
-        rm -f "$build_swap_file"
-    fi
-}
-
 install_runtime_deps() {
     is_zh && log "正在安装运行依赖和 OpenVPN..." || log "Installing runtime dependencies and OpenVPN..."
     if command -v apt-get >/dev/null 2>&1; then
         is_zh && warn "如果系统自动更新正在运行，将等待 apt/dpkg 锁释放。" || warn "Waiting for apt/dpkg lock if unattended upgrades are running."
         apt-get -o DPkg::Lock::Timeout=1800 update
-        apt-get -o DPkg::Lock::Timeout=1800 install -y ca-certificates curl tar gzip openssl openvpn
+        apt-get -o DPkg::Lock::Timeout=1800 install -y ca-certificates curl tar gzip openvpn
     elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y ca-certificates curl tar gzip openssl openvpn
+        dnf install -y ca-certificates curl tar gzip openvpn
     elif command -v yum >/dev/null 2>&1; then
-        yum install -y ca-certificates curl tar gzip openssl openvpn
+        yum install -y ca-certificates curl tar gzip openvpn
     elif command -v apk >/dev/null 2>&1; then
-        apk add --no-cache ca-certificates curl tar gzip openssl openvpn
+        apk add --no-cache ca-certificates curl tar gzip openvpn
     elif command -v pacman >/dev/null 2>&1; then
-        pacman -Sy --noconfirm ca-certificates curl tar gzip openssl openvpn
+        pacman -Sy --noconfirm ca-certificates curl tar gzip openvpn
     elif command -v zypper >/dev/null 2>&1; then
         zypper refresh
-        zypper -q install -y ca-certificates curl tar gzip openssl openvpn
+        zypper -q install -y ca-certificates curl tar gzip openvpn
     else
         fail "Unsupported package manager / 不支持的包管理器"
-    fi
-}
-
-install_build_deps() {
-    is_zh && warn "未找到预编译一体包，回退为本机编译，将安装 Go/GCC。" || warn "Prebuilt bundle not found. Falling back to local build with Go/GCC."
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get -o DPkg::Lock::Timeout=1800 install -y unzip gcc libc6-dev make
-    elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y unzip gcc glibc-devel make
-    elif command -v yum >/dev/null 2>&1; then
-        yum install -y unzip gcc glibc-devel make
-    elif command -v apk >/dev/null 2>&1; then
-        apk add --no-cache unzip gcc musl-dev make
-    elif command -v pacman >/dev/null 2>&1; then
-        pacman -Sy --noconfirm unzip gcc make
-    elif command -v zypper >/dev/null 2>&1; then
-        zypper -q install -y unzip gcc glibc-devel make
     fi
 }
 
@@ -116,29 +65,6 @@ detect_arch() {
         armv7* | armv6* | arm*) echo "arm" ;;
         *) echo "amd64" ;;
     esac
-}
-
-detect_go_arch() {
-    case "$(uname -m)" in
-        x86_64 | amd64) echo "amd64" ;;
-        i386 | i686) echo "386" ;;
-        aarch64 | arm64) echo "arm64" ;;
-        armv6* | armv7* | arm*) echo "armv6l" ;;
-        *) echo "amd64" ;;
-    esac
-}
-
-install_go() {
-    local go_arch
-    go_arch=$(detect_go_arch)
-    local url="https://go.dev/dl/go${GO_VERSION}.linux-${go_arch}.tar.gz"
-    is_zh && log "正在下载 Go ${GO_VERSION} (${go_arch})..." || log "Downloading Go ${GO_VERSION} (${go_arch})..."
-    curl -fL "$url" -o /tmp/x-mili-go.tar.gz
-    is_zh && log "正在安装 Go 运行环境..." || log "Installing Go runtime..."
-    rm -rf /usr/local/go
-    tar -C /usr/local -xzf /tmp/x-mili-go.tar.gz
-    rm -f /tmp/x-mili-go.tar.gz
-    export PATH="/usr/local/go/bin:$PATH"
 }
 
 clean_old_runtime() {
@@ -155,11 +81,7 @@ clean_old_runtime() {
 
 gen_random_string() {
     local length="$1"
-    if command -v openssl >/dev/null 2>&1; then
-        openssl rand -base64 $((length * 2)) | tr -dc 'a-zA-Z0-9' | head -c "$length"
-    else
-        tr -dc 'a-zA-Z0-9' </dev/urandom | head -c "$length"
-    fi
+    tr -dc 'a-zA-Z0-9' </dev/urandom | head -c "$length"
 }
 
 get_server_ip() {
@@ -349,33 +271,11 @@ install_prebuilt_bundle() {
     return 0
 }
 
-build_from_source() {
-    install_build_deps
-    install_go
-
-    is_zh && log "下载 X-MILI 源码" || log "Downloading X-MILI source"
-    log "${REPO}"
-    curl -fL "${REPO}/archive/refs/heads/main.tar.gz" -o "$tmp_dir/source.tar.gz"
-    mkdir -p "$tmp_dir/src"
-    tar -xzf "$tmp_dir/source.tar.gz" -C "$tmp_dir/src" --strip-components=1
-
-    cd "$tmp_dir/src"
-    is_zh && log "编译面板程序，低配机器可能需要一会儿" || log "Building panel binary, this may take a while on small servers"
-    mkdir -p build
-    ensure_build_swap
-    GOMAXPROCS="${X_MILI_GOMAXPROCS:-1}" GOMEMLIMIT="${X_MILI_GOMEMLIMIT:-768MiB}" /usr/local/go/bin/go build -p "${X_MILI_GO_BUILD_P:-1}" -ldflags "-w -s" -o build/x-ui main.go
-    chmod +x DockerInit.sh
-    ./DockerInit.sh "$(detect_arch)"
-
-    cp -a build/. "$INSTALL_DIR/"
-    install -m 755 x-ui.sh /usr/bin/ml
-}
-
 install_program_files() {
     if install_prebuilt_bundle; then
-        is_zh && log "已使用预编译一体包，跳过 Go/GCC 编译。" || log "Prebuilt bundle installed. Skipped Go/GCC build."
+        is_zh && log "已使用预编译一体包，服务器不进行编译。" || log "Prebuilt bundle installed. No server-side build."
     else
-        build_from_source
+        fail "未找到当前架构的一体包。请等待 GitHub Actions 构建完成后重试。"
     fi
     echo "$X_MILI_LANG" > "$LANG_FILE"
 }
@@ -390,7 +290,7 @@ is_zh && step 2 5 "清理旧程序文件，保留面板数据" || step 2 5 "Clea
 clean_old_runtime
 
 tmp_dir=$(mktemp -d -t x-mili-install.XXXXXX)
-trap 'cleanup_build_swap; rm -rf "$tmp_dir"' EXIT
+trap 'rm -rf "$tmp_dir"' EXIT
 
 is_zh && step 3 5 "安装 X-MILI 程序文件" || step 3 5 "Installing X-MILI program files"
 install_program_files

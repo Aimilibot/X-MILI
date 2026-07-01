@@ -17,38 +17,6 @@ log() { echo -e "${green}[${APP_NAME}]${plain} $*"; }
 warn() { echo -e "${yellow}[${APP_NAME}]${plain} $*"; }
 fail() { echo -e "${red}[${APP_NAME}]${plain} $*" >&2; exit 1; }
 
-build_swap_file=""
-build_swap_created=0
-
-ensure_build_swap() {
-    local mem_mb swap_mb size_mb
-    mem_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
-    swap_mb=$(awk '/SwapTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
-    (( mem_mb > 0 && mem_mb < 1536 && swap_mb < 512 )) || return 0
-
-    size_mb="${X_MILI_BUILD_SWAP_MB:-2048}"
-    build_swap_file="${X_MILI_BUILD_SWAP_FILE:-/var/tmp/x-mili-build.swap}"
-    warn "检测到低内存 ${mem_mb}MB，临时启用 ${size_mb}MB swap 防止编译中断。"
-
-    rm -f "$build_swap_file"
-    if command -v fallocate >/dev/null 2>&1; then
-        fallocate -l "${size_mb}M" "$build_swap_file" || dd if=/dev/zero of="$build_swap_file" bs=1M count="$size_mb"
-    else
-        dd if=/dev/zero of="$build_swap_file" bs=1M count="$size_mb"
-    fi
-    chmod 600 "$build_swap_file"
-    mkswap "$build_swap_file" >/dev/null
-    swapon "$build_swap_file"
-    build_swap_created=1
-}
-
-cleanup_build_swap() {
-    if [[ "$build_swap_created" == "1" && -n "$build_swap_file" ]]; then
-        swapoff "$build_swap_file" >/dev/null 2>&1 || true
-        rm -f "$build_swap_file"
-    fi
-}
-
 [[ $EUID -ne 0 ]] && fail "请使用 root 运行 / Please run as root"
 command -v systemctl >/dev/null 2>&1 || fail "需要 systemd / systemd is required"
 [[ -d "$INSTALL_DIR" ]] || fail "未找到安装目录 ${INSTALL_DIR}，请先安装"
@@ -76,7 +44,7 @@ fi
 
 tmp_dir="$(mktemp -d -t x-mili-update.XXXXXX)"
 backup_dir="$(mktemp -d -t x-mili-update-backup.XXXXXX)"
-trap 'cleanup_build_swap; rm -rf "$tmp_dir" "$backup_dir"' EXIT
+trap 'rm -rf "$tmp_dir" "$backup_dir"' EXIT
 
 download_prebuilt_bundle() {
     local arch url package_dir package_commit
@@ -96,36 +64,11 @@ download_prebuilt_bundle() {
     return 0
 }
 
-build_from_source() {
-    local archive_ref go_bin
-    go_bin="${GO_BIN:-/usr/local/go/bin/go}"
-    if [[ ! -x "$go_bin" ]]; then
-        go_bin="$(command -v go || true)"
-    fi
-    [[ -n "$go_bin" && -x "$go_bin" ]] || fail "没有可用预编译包，且本机缺少 Go，无法回退编译。"
-    command -v gcc >/dev/null 2>&1 || fail "没有可用预编译包，且本机缺少 gcc，无法回退编译。"
-
-    archive_ref="${remote_commit:-main}"
-    log "下载最新源码..."
-    curl -fL "${REPO}/archive/${archive_ref}.tar.gz" -o "$tmp_dir/source.tar.gz"
-    mkdir -p "$tmp_dir/src"
-    tar -xzf "$tmp_dir/source.tar.gz" -C "$tmp_dir/src" --strip-components=1
-
-    log "编译面板程序..."
-    cd "$tmp_dir/src"
-    mkdir -p build
-    ensure_build_swap
-    GOMAXPROCS="${X_MILI_GOMAXPROCS:-1}" GOMEMLIMIT="${X_MILI_GOMEMLIMIT:-768MiB}" "$go_bin" build -p "${X_MILI_GO_BUILD_P:-1}" -ldflags "-w -s" -o build/x-ui main.go
-    cp x-ui.sh build/x-ui.sh
-    [[ -n "$remote_commit" ]] && echo "$remote_commit" > build/.x-mili-commit
-}
-
 if download_prebuilt_bundle; then
     update_dir="$tmp_dir/package"
-    log "已使用预编译一体包，跳过本机编译。"
+    log "已使用预编译一体包，服务器不进行编译。"
 else
-    build_from_source
-    update_dir="$tmp_dir/src/build"
+    fail "未找到当前架构的一体包。请等待 GitHub Actions 构建完成后重试。"
 fi
 
 log "备份当前程序..."
