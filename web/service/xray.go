@@ -90,6 +90,26 @@ func RemoveIndex(s []any, index int) []any {
 	return append(s[:index], s[index+1:]...)
 }
 
+func normalizeRealitySettings(stream map[string]any) {
+	realitySettings, ok := stream["realitySettings"].(map[string]any)
+	if !ok {
+		return
+	}
+	if _, ok := realitySettings["dest"]; !ok {
+		if target, ok := realitySettings["target"]; ok {
+			realitySettings["dest"] = target
+		}
+	}
+	delete(realitySettings, "target")
+	if _, ok := realitySettings["maxTimeDiff"]; !ok {
+		if maxTimeDiff, ok := realitySettings["maxTimediff"]; ok {
+			realitySettings["maxTimeDiff"] = maxTimeDiff
+		}
+	}
+	delete(realitySettings, "maxTimediff")
+	delete(realitySettings, "settings")
+}
+
 // GetXrayConfig retrieves and builds the Xray configuration from settings and inbounds.
 func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 	templateConfig, err := s.settingService.GetXrayConfigTemplate()
@@ -172,16 +192,10 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 			var stream map[string]any
 			json.Unmarshal([]byte(inbound.StreamSettings), &stream)
 
-			// Remove the "settings" field under "tlsSettings" and "realitySettings"
-			tlsSettings, ok1 := stream["tlsSettings"].(map[string]any)
-			realitySettings, ok2 := stream["realitySettings"].(map[string]any)
-			if ok1 || ok2 {
-				if ok1 {
-					delete(tlsSettings, "settings")
-				} else if ok2 {
-					delete(realitySettings, "settings")
-				}
+			if tlsSettings, ok := stream["tlsSettings"].(map[string]any); ok {
+				delete(tlsSettings, "settings")
 			}
+			normalizeRealitySettings(stream)
 
 			delete(stream, "externalProxy")
 

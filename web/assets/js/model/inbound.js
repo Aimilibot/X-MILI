@@ -902,7 +902,7 @@ class RealityStreamSettings extends XrayCommonClass {
         return new RealityStreamSettings(
             json.show,
             json.xver,
-            json.target,
+            json.dest || json.target,
             json.serverNames,
             json.privateKey,
             json.minClientVer,
@@ -918,12 +918,12 @@ class RealityStreamSettings extends XrayCommonClass {
         return {
             show: this.show,
             xver: this.xver,
-            target: this.target,
+            dest: this.target,
             serverNames: this.serverNames.split(","),
             privateKey: this.privateKey,
             minClientVer: this.minClientVer,
             maxClientVer: this.maxClientVer,
-            maxTimediff: this.maxTimediff,
+            maxTimeDiff: this.maxTimediff,
             shortIds: this.shortIds.split(","),
             mldsa65Seed: this.mldsa65Seed,
             settings: this.settings,
@@ -1934,7 +1934,7 @@ class Inbound extends XrayCommonClass {
             params.set("security", "reality");
             params.set("pbk", this.stream.reality.settings.publicKey);
             params.set("fp", this.stream.reality.settings.fingerprint);
-            if (!ObjectUtil.isArrEmpty(this.stream.reality.serverNames)) {
+            if (!ObjectUtil.isEmpty(this.stream.reality.serverNames)) {
                 params.set("sni", this.stream.reality.serverNames.split(",")[0]);
             }
             if (this.stream.reality.shortIds.length > 0) {
@@ -2117,7 +2117,7 @@ class Inbound extends XrayCommonClass {
             params.set("security", "reality");
             params.set("pbk", this.stream.reality.settings.publicKey);
             params.set("fp", this.stream.reality.settings.fingerprint);
-            if (!ObjectUtil.isArrEmpty(this.stream.reality.serverNames)) {
+            if (!ObjectUtil.isEmpty(this.stream.reality.serverNames)) {
                 params.set("sni", this.stream.reality.serverNames.split(",")[0]);
             }
             if (this.stream.reality.shortIds.length > 0) {
