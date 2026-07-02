@@ -358,7 +358,8 @@
             },
             applySimpleInbound(type) {
                 this.simpleInboundType = type;
-                const port = type === "vless-ws" ? 2053 : (this.inbound.port || RandomUtil.randomInteger(10000, 60000));
+                const port = type === "vless-reality" ? 443 :
+                    (type === "vless-ws" ? 2053 : (this.inbound.port || RandomUtil.randomInteger(10000, 60000)));
                 inModal.inbound = new Inbound(port);
 
                 if (type === "vless-reality") {
@@ -384,6 +385,10 @@
                 inModal.inbound.protocol = Protocols.MIXED;
             },
             randomPort() {
+                if (this.simpleInboundType === "vless-reality") {
+                    this.inbound.port = 443;
+                    return;
+                }
                 if (this.simpleInboundType === "vless-ws") {
                     const ports = [443, 2053, 2083, 2087, 2096, 8443];
                     this.inbound.port = ports[RandomUtil.randomInteger(0, ports.length - 1)];
